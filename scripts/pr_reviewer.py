@@ -58,8 +58,6 @@ Please review the following code diff for:
 Respond in markdown format with clear findings and suggestions.
 
 Code Diff:
-
-"""
 """
         response = client.chat.completions.create(
             model="gpt-4",
