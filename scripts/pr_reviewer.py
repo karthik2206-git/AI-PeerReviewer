@@ -2,20 +2,23 @@ import os
 import re
 import requests
 from github import Github
+import openai
 
-# Constants
+# Regex rules
 COMMIT_MSG_REGEX = r"^(feat|fix|docs|style|refactor|test|chore): .{10,}$"
 BRANCH_NAME_REGEX = r"^(feature|bugfix|hotfix|release)/[a-z0-9\-_]+$"
 
-# GitHub setup
+# Setup GitHub
 token = os.environ["GITHUB_TOKEN"]
 repo_name = os.environ["GITHUB_REPOSITORY"]
 pr_number = int(os.environ["PR_NUMBER"])
 branch_name = os.environ["PR_BRANCH"]
-
 gh = Github(token)
 repo = gh.get_repo(repo_name)
 pr = repo.get_pull(pr_number)
+
+# Setup OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 def validate_branch_name(branch):
     if not re.match(BRANCH_NAME_REGEX, branch):
@@ -37,10 +40,33 @@ def get_pr_diff(pr):
     response = requests.get(url, headers=headers)
     return response.text if response.status_code == 200 else None
 
-def review_code_with_local_ai(diff_text):
-    # Placeholder for your internal LLM model (e.g., Copilot Enterprise or local LLM)
-    # Simulate the review for now
-    return f"🤖 AI Review (simulated):\nDetected {diff_text.count('+')} additions and {diff_text.count('-')} deletions."
+def review_code_with_openai(diff_text):
+    try:
+        prompt = f"""
+You are a senior DevOps + Security engineer reviewing a pull request for a healthcare company.
+Please review the following code diff for:
+
+1. Code quality, performance, or logic issues
+2. Secrets or credential leaks (e.g., API keys, tokens, passwords)
+3. Sensitive data handling (e.g., patient data, PII, PHI)
+4. Compliance concerns (HIPAA, hardcoded sensitive info)
+
+Respond in markdown format with clear findings and suggestions.
+
+Code Diff:
+"""
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a code reviewer and security expert."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=1000
+        )
+        return "🤖 **AI Code Review:**\n" + response['choices'][0]['message']['content']
+    except Exception as e:
+        return f"⚠️ Failed to connect to OpenAI: {e}"
 
 def post_comment(pr, body):
     pr.create_issue_comment(body)
@@ -48,25 +74,25 @@ def post_comment(pr, body):
 def main():
     issues = []
 
-    # Validate branch name
+    # Check branch name
     branch_issue = validate_branch_name(branch_name)
     if branch_issue:
         issues.append(branch_issue)
 
-    # Validate commit messages
+    # Check commit messages
     commit_issue = validate_commit_messages(pr)
     if commit_issue:
         issues.append(commit_issue)
 
-    # Get PR diff
+    # AI Review
     diff_text = get_pr_diff(pr)
     if diff_text:
-        review = review_code_with_local_ai(diff_text)
-        issues.append(review)
+        ai_review = review_code_with_openai(diff_text)
+        issues.append(ai_review)
     else:
         issues.append("⚠️ Could not fetch PR diff.")
 
-    # Combine and post comment
+    # Post result
     final_comment = "\n\n".join(issues)
     post_comment(pr, final_comment)
 
