@@ -60,7 +60,7 @@ Respond in markdown format with clear findings and suggestions.
 Code Diff:
 """
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a code reviewer and security expert."},
                 {"role": "user", "content": prompt}
