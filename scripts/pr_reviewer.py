@@ -40,6 +40,10 @@ def get_pr_diff(pr):
     response = requests.get(url, headers=headers)
     return response.text if response.status_code == 200 else None
 
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 def review_code_with_openai(diff_text):
     try:
         prompt = f"""
@@ -54,8 +58,10 @@ Please review the following code diff for:
 Respond in markdown format with clear findings and suggestions.
 
 Code Diff:
+
 """
-        response = openai.ChatCompletion.create(
+"""
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": "You are a code reviewer and security expert."},
@@ -64,10 +70,10 @@ Code Diff:
             temperature=0.2,
             max_tokens=1000
         )
-        return "🤖 **AI Code Review:**\n" + response['choices'][0]['message']['content']
+        return "🤖 **AI Code Review:**\n" + response.choices[0].message.content
     except Exception as e:
         return f"⚠️ Failed to connect to OpenAI: {e}"
-
+        
 def post_comment(pr, body):
     pr.create_issue_comment(body)
 
