@@ -2,13 +2,17 @@ import os
 import re
 import subprocess
 from github import Github
+import tempfile
+import git
+import sys
+import json
 
 # ---------------- CONFIG ---------------- #
-BRANCH_NAME_REGEX = r"^(feature|bug|chore)\/AB#(1?[0-9]{6})-|^((.*?)dependabot\/|sync\/|release\/|hotfix\/|support\/)"
+BRANCH_NAME_REGEX = r"^(feature|bug|chore)(\/AB#\d{6,7})?-"
 COMMIT_MSG_REGEX = r"^(feat|fix|chore|docs|style|refactor|test|perf)\(AB#\d{6,7}\):\s?.+"
 COMMIT_LINE_LENGTH_REGEX = r"^.{1,72}$"
 
-MARKER = "<!-- ai-peer-review -->"  # marker to identify/update existing comment
+MARKER = "<!-- ai-peer-review -->"
 
 # ---------------- HELPERS ---------------- #
 def validate_branch_name(branch_name):
@@ -20,35 +24,28 @@ def validate_branch_name(branch_name):
 def validate_commit_messages(pr):
     commit_results = []
     invalid_found = False
-
     for commit in pr.get_commits():
         sha = commit.sha[:7]
         msg = commit.commit.message.splitlines()[0].strip()
-
         issues = []
         status = "✅"
-
         if not re.match(COMMIT_MSG_REGEX, msg):
             issues.append("Invalid format")
             status = "❌"
             invalid_found = True
-
         if not re.match(COMMIT_LINE_LENGTH_REGEX, msg):
             issues.append("Too long")
             if status == "✅":
                 status = "⚠️"
             invalid_found = True
-
         commit_results.append(
             f"| `{sha}` | {status} | {msg} | {'; '.join(issues) if issues else 'OK'} |"
         )
-
     result = []
     result.append("### Commit Message Validation\n")
     result.append("| Commit | Status | Message | Notes |")
     result.append("|--------|--------|---------|-------|")
     result.extend(commit_results)
-
     return "\n".join(result), not invalid_found
 
 
@@ -63,32 +60,24 @@ def summarize_pr(pr):
 
 # ---------------- GITLEAKS SCAN ---------------- #
 def run_gitleaks_scan(repo_path="."):
-    """
-    Runs gitleaks in filesystem mode for the current branch.
-    Returns a list of detected secrets.
-    """
     try:
         result = subprocess.run(
             ["gitleaks", "detect", "--source", repo_path, "--report-format", "json"],
-            capture_output=True,
-            text=True,
-            check=False
+            capture_output=True, text=True, check=False
         )
-        output = result.stdout.strip()
-        import json
         secrets = []
-        if output:
-            data = json.loads(output)
+        if result.stdout.strip():
+            data = json.loads(result.stdout)
             for entry in data:
                 path = entry.get("file", "")
-                secret_type = entry.get("rule", "")
-                secrets.append(f"{secret_type} found in `{path}`")
+                rule = entry.get("rule", "")
+                secrets.append(f"{rule} found in `{path}`")
         return secrets
     except Exception as e:
         return [f"Gitleaks scan failed: {e}"]
 
 
-# ---------------- REPORT GENERATION ---------------- #
+# ---------------- REPORT ---------------- #
 def generate_report(pr, branch_msg, commit_validation, gitleaks_issues,
                     branch_status, commit_status, security_status):
     summary_table = [
@@ -119,9 +108,6 @@ def generate_report(pr, branch_msg, commit_validation, gitleaks_issues,
 
 # ---------------- MAIN ---------------- #
 def main():
-    import sys
-    import tempfile
-
     if len(sys.argv) == 4:
         _, repo_name, pr_number, token = sys.argv
     else:
@@ -129,7 +115,7 @@ def main():
         pr_number = os.getenv("PR_NUMBER")
         token = os.getenv("GITHUB_TOKEN")
         if not (repo_name and pr_number and token):
-            print("❌ Missing arguments or environment variables (GITHUB_REPOSITORY, PR_NUMBER, GITHUB_TOKEN)")
+            print("❌ Missing arguments or environment variables")
             return
 
     g = Github(token)
@@ -144,11 +130,9 @@ def main():
     commit_validation, commits_valid = validate_commit_messages(pr)
     commit_status = "✅" if commits_valid else "❌"
 
-    # Security scan with Gitleaks
-    # Clone PR branch to a temporary folder for scanning
-    import git
+    # Clone PR branch to temp dir for scanning
     temp_dir = tempfile.mkdtemp()
-    repo_clone = git.Repo.clone_from(repo.clone_url, temp_dir, branch=pr.head.ref)
+    git.Repo.clone_from(repo.clone_url, temp_dir, branch=pr.head.ref)
     gitleaks_issues = run_gitleaks_scan(temp_dir)
     security_status = "✅" if not gitleaks_issues else "❌"
 
