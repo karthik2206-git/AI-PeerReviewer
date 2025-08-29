@@ -30,54 +30,52 @@ gh = Github(token)
 repo = gh.get_repo(repo_name)
 pr = repo.get_pull(pr_number)
 
-# Setup Copilot
-copilot_token = os.getenv("COPILOT_TOKEN")
-copilot_api_url = os.getenv("COPILOT_API_URL", "https://api.githubcopilot.com/v1/ai/review")
-
 
 def validate_branch_name(branch):
     if not re.match(BRANCH_NAME_REGEX, branch):
-        return f" **Branch name** `{branch}` does not follow naming convention: `{BRANCH_NAME_REGEX}`"
+        return f"**Branch name** `{branch}` does not follow naming convention: `{BRANCH_NAME_REGEX}`"
     return None
 
 
 def validate_commit_messages(pr):
-    invalid_commits = []
-    length_violations = []
+    commit_results = []
+    invalid_commits = False
 
     for commit in pr.get_commits():
-        msg = commit.commit.message.splitlines()[0]  # Only check first line
+        sha = commit.sha[:7]
+        msg = commit.commit.message.splitlines()[0]  # only first line
+        status = "✅"
+        notes = []
+
         if not re.match(COMMIT_MSG_REGEX, msg):
-            invalid_commits.append(msg)
+            notes.append("Invalid format")
+            status = "❌"
+            invalid_commits = True
         if not re.match(COMMIT_LINE_LENGTH_REGEX, msg):
-            length_violations.append(msg)
+            notes.append("Too long")
+            if status == "✅":  # downgrade only if not already ❌
+                status = "⚠️"
+            invalid_commits = True
+
+        commit_results.append(f"| `{sha}` | {status} | {msg} | {', '.join(notes) if notes else 'OK'} |")
 
     result = []
-    if invalid_commits:
-        result.append(
-            " **Invalid commit messages** detected:\n"
-            + "\n".join(f"- `{msg}`" for msg in invalid_commits)
-        )
-    if length_violations:
-        result.append(
-            " **Commit message line length violations (<74 chars):**\n"
-            + "\n".join(f"- `{msg}`" for msg in length_violations)
-        )
-    return "\n\n".join(result) if result else None
+    result.append("### Commit Message Validation\n")
+    result.append("| Commit   | Status | Message | Notes |")
+    result.append("|----------|--------|---------|-------|")
+    result.extend(commit_results)
+
+    return "\n".join(result), (not invalid_commits)
 
 
 def get_pr_diff(pr):
-    # Use patch-diff endpoint for better compatibility
     url = f"https://patch-diff.githubusercontent.com/raw/{repo_name}/pull/{pr_number}.diff?token={token}"
-    print(f"[DEBUG] Patch Diff URL: {url}")
     response = requests.get(url)
-    print(f"[DEBUG] Response status code: {response.status_code}")
-    if response.status_code != 200:
-        print(f"[DEBUG] Response text: {response.text}")
-    return response.text if response.status_code == 200 else None
+    if response.status_code == 200:
+        return response.text
+    return None
 
 
-# Automated Security Checks
 def scan_for_secrets(diff_text):
     secret_patterns = [
         r'(?i)(api[_-]?key|token|secret|password|passwd|pwd)[\s:=]+[\'\"]?[A-Za-z0-9\-_/+=]{8,}',
@@ -92,11 +90,10 @@ def scan_for_secrets(diff_text):
         if matches:
             findings.extend(matches)
     if findings:
-        return " **Potential secrets/credentials detected:**\n" + "\n".join(f"- `{match}`" for match in findings)
-    return None
+        return "### 🔒 Security Scan: Issues Found\n" + "\n".join(f"- `{match}`" for match in findings)
+    return "### 🔒 Security Scan: No Issues\nNo secrets or credentials detected."
 
 
-# Compliance & Policy Enforcement
 def scan_for_compliance(diff_text):
     compliance_keywords = [
         r'patient', r'PII', r'PHI', r'HIPAA', r'ssn', r'dob', r'address', r'phone', r'email', r'health', r'medical'
@@ -107,28 +104,25 @@ def scan_for_compliance(diff_text):
     findings = []
     for keyword in compliance_keywords:
         if re.search(keyword, diff_text, re.IGNORECASE):
-            findings.append(f"Keyword `{keyword}` found in diff (check for proper handling)")
+            findings.append(f"Keyword `{keyword}` found (check handling)")
     for pattern in risky_patterns:
         if re.search(pattern, diff_text):
-            findings.append(f"Risky pattern `{pattern}` found in diff (review for compliance)")
+            findings.append(f"Risky pattern `{pattern}` found (review carefully)")
     if findings:
-        return " **Compliance/Policy concerns detected:**\n" + "\n".join(f"- {msg}" for msg in findings)
-    return None
+        return "### 📜 Compliance Scan: Issues Found\n" + "\n".join(f"- {msg}" for msg in findings)
+    return "### 📜 Compliance Scan: No Issues\nNo compliance issues detected."
 
 
 def summarize_pr_changes(diff_text):
-    """
-    Returns a high-level summary of changes in the PR diff.
-    """
     added = len(re.findall(r'^\+[^+]', diff_text, re.MULTILINE))
     removed = len(re.findall(r'^-[^-]', diff_text, re.MULTILINE))
     files_changed = len(re.findall(r'diff --git', diff_text))
-    summary = [
-        f"**Files changed:** {files_changed}",
-        f"**Lines added:** {added}",
-        f"**Lines removed:** {removed}"
-    ]
-    return "\n".join(summary)
+    return (
+        "### High-level PR Summary\n"
+        f"**Files changed:** {files_changed}\n"
+        f"**Lines added:** {added}\n"
+        f"**Lines removed:** {removed}\n"
+    )
 
 
 def post_comment(pr, body):
@@ -137,63 +131,44 @@ def post_comment(pr, body):
 
 def main():
     issues = []
-    summary_table = [
-        '| Check            | Status   |',
-        '|------------------|----------|'
-    ]
-    branch_status = 'Pass'
-    commit_status = 'Pass'
-    security_status = 'Pass'
-    compliance_status = 'Pass'
 
-    # Check branch name
+    # Branch validation
     branch_issue = validate_branch_name(branch_name)
+    branch_status = "✅" if not branch_issue else "❌"
     if branch_issue:
-        issues.append(f"### Branch Name Validation\n{branch_issue}")
-        branch_status = 'Fail'
+        issues.append("### Branch Name Validation\n" + branch_issue)
 
-    # Check commit messages
-    commit_issue = validate_commit_messages(pr)
-    if commit_issue:
-        issues.append(f"### Commit Message Validation\n{commit_issue}")
-        commit_status = 'Fail'
+    # Commit messages
+    commit_section, valid_commits = validate_commit_messages(pr)
+    commit_status = "✅" if valid_commits else "❌"
+    issues.append(commit_section)
 
-    # AI Review & Security/Compliance Checks
+    # PR diff scans
     diff_text = get_pr_diff(pr)
     if diff_text:
-        # High-level PR summary
-        summary = summarize_pr_changes(diff_text)
-        issues.append('### High-level PR Summary\n' + summary)
+        issues.append(summarize_pr_changes(diff_text))
 
-        # Security checks
-        secret_issue = scan_for_secrets(diff_text)
-        if secret_issue:
-            issues.append('<details>\n<summary> **Security Scan: Issues Found**</summary>\n'
-                          + secret_issue + '\n</details>')
-            security_status = 'Fail'
-        else:
-            issues.append('<details>\n<summary> **Security Scan: No Issues**</summary>\n'
-                          'No secrets or credentials detected.\n</details>')
+        sec_result = scan_for_secrets(diff_text)
+        issues.append(f"<details>\n<summary>🔒 Security Scan</summary>\n\n{sec_result}\n</details>")
+        security_status = "✅" if "No Issues" in sec_result else "❌"
 
-        # Compliance checks
-        compliance_issue = scan_for_compliance(diff_text)
-        if compliance_issue:
-            issues.append('<details>\n<summary> **Compliance Scan: Issues Found**</summary>\n'
-                          + compliance_issue + '\n</details>')
-            compliance_status = 'Warn'
-        else:
-            issues.append('<details>\n<summary> **Compliance Scan: No Issues**</summary>\n'
-                          'No compliance issues detected.\n</details>')
+        comp_result = scan_for_compliance(diff_text)
+        issues.append(f"<details>\n<summary>📜 Compliance Scan</summary>\n\n{comp_result}\n</details>")
+        compliance_status = "✅" if "No Issues" in comp_result else "⚠️"
     else:
-        issues.append("### PR Diff Error\n Could not fetch PR diff. Please check if the PR is accessible and the token is valid.")
-        security_status = 'Fail'
-        compliance_status = 'Fail'
+        issues.append("### PR Diff Error\nCould not fetch PR diff.")
+        security_status = "❌"
+        compliance_status = "❌"
 
-    # Add summary table at the top
-    summary_table.append(f'| Branch Name      | {branch_status} |')
-    summary_table.append(f'| Commit Messages  | {commit_status} |')
-    summary_table.append(f'| Security         | {security_status} |')
-    summary_table.append(f'| Compliance       | {compliance_status} |')
+    # Summary table
+    summary_table = [
+        "| Check            | Status |",
+        "|------------------|--------|",
+        f"| Branch Name      | {branch_status} |",
+        f"| Commit Messages  | {commit_status} |",
+        f"| Security         | {security_status} |",
+        f"| Compliance       | {compliance_status} |",
+    ]
 
     final_comment = "\n".join(summary_table) + "\n\n" + "\n\n".join(issues)
     post_comment(pr, final_comment)
