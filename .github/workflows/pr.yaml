@@ -28,10 +28,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install PyGithub gitpython
 
-      - name: Install Gitleaks
-        uses: zricethezav/gitleaks-action@v2
-        with:
-          version: latest
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          #GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }} 
 
       - name: Run PR Review
         env:
