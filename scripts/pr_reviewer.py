@@ -1,9 +1,8 @@
 import os
 import re
-import subprocess
 import tempfile
+import subprocess
 import git
-import sys
 import json
 from github import Github
 
@@ -86,17 +85,28 @@ def run_compliance_scan(repo_path="."):
     return file_issues
 
 # ---------------- GITHUB SECRET SCANNING ---------------- #
+import requests
 def fetch_github_secret_scan(pr, repo):
     secrets_by_file = {}
     try:
-        alerts = repo.get_secret_scanning_alerts(state="open")
-        for alert in alerts:
-            # Only include files changed in PR if available
-            file_path = alert.secret_type or "unknown file"
-            secrets_by_file.setdefault(file_path, []).append(alert.secret_type)
-        return secrets_by_file
+        url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/secret-scanning/alerts"
+        headers = {
+            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+            "Accept": "application/vnd.github+json"
+        }
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            data = resp.json()
+            for alert in data:
+                path = alert.get("secret_type", "unknown file")
+                secrets_by_file.setdefault(path, []).append(alert.get("secret_type"))
+        elif resp.status_code == 404:
+            secrets_by_file = {"Info": ["GitHub Secret Scanning not enabled on this repo."]}
+        else:
+            secrets_by_file = {"Error": [f"{resp.status_code} {resp.text}"]}
     except Exception as e:
-        return {"GitHub Secret Scan Error": [str(e)]}
+        secrets_by_file = {"Error": [str(e)]}
+    return secrets_by_file
 
 # ---------------- REPORT ---------------- #
 def generate_report(pr, branch_msg, commit_validation, gitleaks_issues, compliance_issues, github_secrets,
@@ -160,11 +170,17 @@ def main():
     # Security & compliance
     gitleaks_issues = run_gitleaks_scan(temp_dir)
     compliance_issues = run_compliance_scan(temp_dir)
+
+    # Determine status
     security_status = "✅" if not gitleaks_issues else "❌"
     compliance_status = "✅" if not compliance_issues else "⚠️"
 
     # GitHub Secret Scanning
     github_secrets = fetch_github_secret_scan(pr, repo)
+
+    # Adjust security status if GitHub Secret Scan finds issues
+    if github_secrets and not ("not enabled" in list(github_secrets.values())[0][0]):
+        security_status = "❌" if gitleaks_issues or github_secrets else "✅"
 
     # Generate report
     report = generate_report(pr, branch_msg, commit_validation, gitleaks_issues, compliance_issues, github_secrets,
