@@ -14,6 +14,15 @@ COMMIT_LINE_LENGTH_REGEX = r"^.{1,72}$"
 
 MARKER = "<!-- ai-peer-review -->"
 
+# ---------------- COMPLIANCE CONFIG ---------------- #
+COMPLIANCE_KEYWORDS = [
+    r'patient', r'PII', r'PHI', r'HIPAA', r'ssn', r'dob', r'address', r'phone', r'email', r'health', r'medical'
+]
+
+RISKY_PATTERNS = [
+    r'print\s*\(', r'logging\.debug', r'logging\.info', r'open\s*\(', r'pickle\.load', r'eval\s*\(', r'exec\s*\('
+]
+
 # ---------------- HELPERS ---------------- #
 def validate_branch_name(branch_name):
     if not re.match(BRANCH_NAME_REGEX, branch_name):
@@ -77,15 +86,40 @@ def run_gitleaks_scan(repo_path="."):
         return [f"Gitleaks scan failed: {e}"]
 
 
+# ---------------- COMPLIANCE SCAN ---------------- #
+def run_compliance_scan(repo_path="."):
+    findings = []
+    for root, dirs, files in os.walk(repo_path):
+        for file in files:
+            if file.endswith(('.py', '.js', '.txt', '.yaml', '.json')):
+                path = os.path.join(root, file)
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    # check keywords
+                    for kw in COMPLIANCE_KEYWORDS:
+                        if re.search(kw, content, re.IGNORECASE):
+                            findings.append(f"Keyword `{kw}` found in `{file}`")
+                    # check risky patterns
+                    for rp in RISKY_PATTERNS:
+                        if re.search(rp, content):
+                            findings.append(f"Risky pattern `{rp}` found in `{file}`")
+                except:
+                    continue
+    return findings
+
+
 # ---------------- REPORT ---------------- #
 def generate_report(pr, branch_msg, commit_validation, gitleaks_issues,
-                    branch_status, commit_status, security_status):
+                    compliance_issues, branch_status, commit_status,
+                    security_status, compliance_status):
     summary_table = [
         "| Check            | Status |",
         "|------------------|--------|",
         f"| Branch Name      | {branch_status} |",
         f"| Commit Messages  | {commit_status} |",
         f"| Security         | {security_status} |",
+        f"| Compliance       | {compliance_status} |"
     ]
 
     report_parts = [
@@ -102,6 +136,13 @@ def generate_report(pr, branch_msg, commit_validation, gitleaks_issues,
         report_parts.append(f"<details>\n<summary>🔒 Security Scan: Issues Found</summary>\n\n{sec_text}\n</details>")
     else:
         report_parts.append("🔒 Security Scan: No issues found ✅")
+
+    # Compliance
+    if compliance_issues:
+        comp_text = "\n".join(f"- {issue}" for issue in compliance_issues)
+        report_parts.append(f"<details>\n<summary>⚖️ Compliance Scan: Issues Found</summary>\n\n{comp_text}\n</details>")
+    else:
+        report_parts.append("⚖️ Compliance Scan: No issues found ✅")
 
     return MARKER + "\n" + "\n\n".join(report_parts)
 
@@ -133,12 +174,19 @@ def main():
     # Clone PR branch to temp dir for scanning
     temp_dir = tempfile.mkdtemp()
     git.Repo.clone_from(repo.clone_url, temp_dir, branch=pr.head.ref)
+
+    # Security scan
     gitleaks_issues = run_gitleaks_scan(temp_dir)
     security_status = "✅" if not gitleaks_issues else "❌"
 
+    # Compliance scan
+    compliance_issues = run_compliance_scan(temp_dir)
+    compliance_status = "✅" if not compliance_issues else "⚠️"
+
     # Generate report
     report = generate_report(pr, branch_msg, commit_validation, gitleaks_issues,
-                             branch_status, commit_status, security_status)
+                             compliance_issues, branch_status, commit_status,
+                             security_status, compliance_status)
 
     print(report)
 
