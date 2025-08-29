@@ -1,5 +1,5 @@
+import os
 import re
-import sys
 from github import Github
 
 # ---------------- CONFIG ---------------- #
@@ -17,6 +17,8 @@ COMPLIANCE_PATTERNS = [
     r"eval\(",
 ]
 
+MARKER = "<!-- ai-peer-review -->"  # marker to identify/update existing comment
+
 # ---------------- HELPERS ---------------- #
 def validate_branch_name(branch_name):
     if not re.match(BRANCH_NAME_REGEX, branch_name):
@@ -26,6 +28,8 @@ def validate_branch_name(branch_name):
 
 def validate_commit_messages(pr):
     commit_results = []
+    invalid_found = False
+
     for commit in pr.get_commits():
         sha = commit.sha[:7]
         msg = commit.commit.message.splitlines()[0].strip()
@@ -36,11 +40,13 @@ def validate_commit_messages(pr):
         if not re.match(COMMIT_MSG_REGEX, msg):
             issues.append("Invalid format")
             status = "❌"
+            invalid_found = True
 
         if not re.match(COMMIT_LINE_LENGTH_REGEX, msg):
             issues.append("Too long")
             if status == "✅":
                 status = "⚠️"
+            invalid_found = True
 
         commit_results.append(
             f"| `{sha}` | {status} | {msg} | {'; '.join(issues) if issues else 'OK'} |"
@@ -52,7 +58,7 @@ def validate_commit_messages(pr):
     result.append("|--------|--------|---------|-------|")
     result.extend(commit_results)
 
-    return "\n".join(result)
+    return "\n".join(result), not invalid_found
 
 
 def run_security_scan(pr):
@@ -84,29 +90,7 @@ def summarize_pr(pr):
 """
 
 
-# ---------------- MAIN ---------------- #
-def main(repo_name, pr_number, token):
-    g = Github(token)
-    repo = g.get_repo(repo_name)
-    pr = repo.get_pull(int(pr_number))
-
-    # Branch name
-    branch_valid, branch_msg = validate_branch_name(pr.head.ref)
-
-    # Commit messages
-    commit_validation = validate_commit_messages(pr)
-
-    # Security + compliance scans
-    security_issues = run_security_scan(pr)
-    compliance_issues = run_compliance_scan(pr)
-
-    # Statuses
-    branch_status = "✅" if branch_valid else "❌"
-    commit_status = "✅" if "Invalid format" not in commit_validation and "Too long" not in commit_validation else "❌"
-    security_status = "✅" if not security_issues else "❌"
-    compliance_status = "✅" if not compliance_issues else "⚠️"
-
-    # Summary table
+def generate_report(pr, branch_msg, commit_validation, security_scan, compliance_scan, branch_status, commit_status, security_status, compliance_status):
     summary_table = [
         "| Check            | Status |",
         "|------------------|--------|",
@@ -116,34 +100,35 @@ def main(repo_name, pr_number, token):
         f"| Compliance       | {compliance_status} |",
     ]
 
-    # Final report
-    print("\n".join(summary_table))
-    print("\n### Branch Name Validation")
-    print(branch_msg)
+    report_parts = [
+        "\n".join(summary_table),
+        "### Branch Name Validation",
+        branch_msg,
+        summarize_pr(pr),
+        commit_validation,
+    ]
 
-    print(summarize_pr(pr))
-    print(commit_validation)
-
-    if security_issues:
-        print("\n<details>\n<summary>🔒 Security Scan: Issues Found</summary>\n")
-        for issue in security_issues:
-            print(f"- {issue}")
-        print("</details>")
+    # Security
+    if security_scan:
+        sec_text = "\n".join(f"- {issue}" for issue in security_scan)
+        report_parts.append(f"<details>\n<summary>🔒 Security Scan: Issues Found</summary>\n\n{sec_text}\n</details>")
     else:
-        print("\n🔒 Security Scan: No issues found ✅")
+        report_parts.append("🔒 Security Scan: No issues found ✅")
 
-    if compliance_issues:
-        print("\n<details>\n<summary>📜 Compliance Scan: Issues Found</summary>\n")
-        for issue in compliance_issues:
-            print(f"- {issue}")
-        print("</details>")
+    # Compliance
+    if compliance_scan:
+        comp_text = "\n".join(f"- {issue}" for issue in compliance_scan)
+        report_parts.append(f"<details>\n<summary>📜 Compliance Scan: Issues Found</summary>\n\n{comp_text}\n</details>")
     else:
-        print("\n📜 Compliance Scan: No issues found ✅")
+        report_parts.append("📜 Compliance Scan: No issues found ✅")
+
+    return MARKER + "\n" + "\n\n".join(report_parts)
 
 
-if __name__ == "__main__":
-    import os
-
+# ---------------- MAIN ---------------- #
+def main():
+    # Get repo/pr info from CLI args or environment
+    import sys
     if len(sys.argv) == 4:
         _, repo_name, pr_number, token = sys.argv
     else:
@@ -152,8 +137,50 @@ if __name__ == "__main__":
         token = os.getenv("GITHUB_TOKEN")
 
         if not (repo_name and pr_number and token):
-            print("❌ Missing arguments. Provide CLI args or set env vars: GITHUB_REPOSITORY, PR_NUMBER, GITHUB_TOKEN")
-            sys.exit(1)
+            print("❌ Missing arguments or environment variables (GITHUB_REPOSITORY, PR_NUMBER, GITHUB_TOKEN)")
+            return
 
-    main(repo_name, pr_number, token)
+    g = Github(token)
+    repo = g.get_repo(repo_name)
+    pr = repo.get_pull(int(pr_number))
 
+    # Branch name check
+    branch_valid, branch_msg = validate_branch_name(pr.head.ref)
+    branch_status = "✅" if branch_valid else "❌"
+
+    # Commit messages
+    commit_validation, commits_valid = validate_commit_messages(pr)
+    commit_status = "✅" if commits_valid else "❌"
+
+    # Security & compliance
+    security_issues = run_security_scan(pr)
+    compliance_issues = run_compliance_scan(pr)
+    security_status = "✅" if not security_issues else "❌"
+    compliance_status = "✅" if not compliance_issues else "⚠️"
+
+    # Generate report
+    report = generate_report(
+        pr, branch_msg, commit_validation,
+        security_issues, compliance_issues,
+        branch_status, commit_status, security_status, compliance_status
+    )
+
+    print(report)
+
+    # Post/update PR comment
+    existing_comment = None
+    for comment in pr.get_issue_comments():
+        if MARKER in comment.body:
+            existing_comment = comment
+            break
+
+    if existing_comment:
+        existing_comment.edit(report)
+        print("🔄 Updated existing PR review comment.")
+    else:
+        pr.create_issue_comment(report)
+        print("📝 Created new PR review comment.")
+
+
+if __name__ == "__main__":
+    main()
