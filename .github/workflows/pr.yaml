@@ -6,37 +6,33 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write   # needed to comment on PR
+  pull-requests: write
 
 jobs:
   pr-review:
     runs-on: ubuntu-latest
     steps:
 
-      # Checkout the PR branch
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # needed for full history and gitleaks
+          fetch-depth: 0
 
-      # Setup Python
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: 3.11
 
-      # Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install PyGithub gitpython
 
-      # Install Gitleaks
       - name: Install Gitleaks
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/zricethezav/gitleaks/main/install.sh | bash
+        uses: zricethezav/gitleaks-action@v2
+        with:
+          version: latest
 
-      # Run PR Reviewer Script
       - name: Run PR Review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
