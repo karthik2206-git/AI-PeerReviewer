@@ -100,8 +100,9 @@ def fetch_github_secret_scan(pr, repo):
             for alert in data:
                 path = alert.get("secret_type", "unknown file")
                 secrets_by_file.setdefault(path, []).append(alert.get("secret_type"))
-        elif resp.status_code == 404:
-            secrets_by_file = {"Info": ["GitHub Secret Scanning not enabled on this repo."]}
+        elif resp.status_code in (403, 404):
+            # Secret scanning not available or not accessible
+            secrets_by_file = {"Info": ["GitHub Secret Scanning not available for this repo/token."]}
         else:
             secrets_by_file = {"Error": [f"{resp.status_code} {resp.text}"]}
     except Exception as e:
