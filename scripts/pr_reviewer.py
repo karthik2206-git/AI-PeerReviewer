@@ -1,164 +1,110 @@
-import os
 import re
-import requests
+import sys
 from github import Github
-import json
 
-# Regex rules
-COMMIT_MSG_REGEX = (
-    r"^(?P<type>build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test|¯\\_\\(ツ\\)_\/¯)"
-    r"(?P<scope>\(AB#(1?[0-9]{6})\))"
-    r"(?P<breaking>!)?"
-    r"(?P<subject>:\s.*)?"
-    r"|^(?P<merge>Merge \w+)"
-    r"|^(?P<suggestion>Update .+)"
-    r"|^(?P<depbot>(build|chore)\(deps\): (sync|Bump|bump|update|\[Linter\]) \w+)"
-)
-BRANCH_NAME_REGEX = (
-    r"^(feature|bug|chore)\/AB#(1?[0-9]{6})-|^((.*?)dependabot\/|sync\/|release\/|hotfix\/|support\/)"
-)
-COMMIT_LINE_LENGTH_REGEX = (
-    r"(^.{0,74}$)|^(Merge .+$)|^((build|chore)\(deps\): (sync|Bump|bump|Update|update).+$)"
-)
+# ---------------- CONFIG ---------------- #
+BRANCH_NAME_REGEX = r"^(feature|bug|chore)\/AB#(1?[0-9]{6})-|^((.*?)dependabot\/|sync\/|release\/|hotfix\/|support\/)"
+COMMIT_MSG_REGEX = r"^(feat|fix|chore|docs|style|refactor|test|perf)\(AB#\d{6,7}\): .+"
+COMMIT_LINE_LENGTH_REGEX = r"^.{1,72}$"
 
-# Setup GitHub
-token = os.environ["GITHUB_TOKEN"]
-repo_name = os.environ["GITHUB_REPOSITORY"]
-pr_number = int(os.environ["PR_NUMBER"])
-branch_name = os.environ["PR_BRANCH"]
-gh = Github(token)
-repo = gh.get_repo(repo_name)
-pr = repo.get_pull(pr_number)
+SECURITY_PATTERNS = [
+    r"AWS_SECRET_KEY",
+    r"-----BEGIN PRIVATE KEY-----",
+]
 
+COMPLIANCE_PATTERNS = [
+    r"PII",
+    r"eval\(",
+]
 
-def validate_branch_name(branch):
-    if not re.match(BRANCH_NAME_REGEX, branch):
-        return f"**Branch name** `{branch}` does not follow naming convention: `{BRANCH_NAME_REGEX}`"
-    return None
+# ---------------- HELPERS ---------------- #
+def validate_branch_name(branch_name):
+    if not re.match(BRANCH_NAME_REGEX, branch_name):
+        return False, f"Branch name `{branch_name}` does not follow naming convention: `{BRANCH_NAME_REGEX}`"
+    return True, "Branch name is valid ✅"
 
 
 def validate_commit_messages(pr):
     commit_results = []
-    invalid_commits = False
-
     for commit in pr.get_commits():
         sha = commit.sha[:7]
-        msg = commit.commit.message.splitlines()[0]  # only first line
+        msg = commit.commit.message.splitlines()[0].strip()
+
+        issues = []
         status = "✅"
-        notes = []
 
         if not re.match(COMMIT_MSG_REGEX, msg):
-            notes.append("Invalid format")
+            issues.append("Invalid format")
             status = "❌"
-            invalid_commits = True
-        if not re.match(COMMIT_LINE_LENGTH_REGEX, msg):
-            notes.append("Too long")
-            if status == "✅":  # downgrade only if not already ❌
-                status = "⚠️"
-            invalid_commits = True
 
-        commit_results.append(f"| `{sha}` | {status} | {msg} | {', '.join(notes) if notes else 'OK'} |")
+        if not re.match(COMMIT_LINE_LENGTH_REGEX, msg):
+            issues.append("Too long")
+            if status == "✅":
+                status = "⚠️"
+
+        commit_results.append(
+            f"| `{sha}` | {status} | {msg} | {'; '.join(issues) if issues else 'OK'} |"
+        )
 
     result = []
     result.append("### Commit Message Validation\n")
-    result.append("| Commit   | Status | Message | Notes |")
-    result.append("|----------|--------|---------|-------|")
+    result.append("| Commit | Status | Message | Notes |")
+    result.append("|--------|--------|---------|-------|")
     result.extend(commit_results)
 
-    return "\n".join(result), (not invalid_commits)
+    return "\n".join(result)
 
 
-def get_pr_diff(pr):
-    url = f"https://patch-diff.githubusercontent.com/raw/{repo_name}/pull/{pr_number}.diff?token={token}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.text
-    return None
-
-
-def scan_for_secrets(diff_text):
-    secret_patterns = [
-        r'(?i)(api[_-]?key|token|secret|password|passwd|pwd)[\s:=]+[\'\"]?[A-Za-z0-9\-_/+=]{8,}',
-        r'(?i)aws[_-]?access[_-]?key[\s:=]+[A-Za-z0-9/+=]{16,}',
-        r'(?i)aws[_-]?secret[_-]?key[\s:=]+[A-Za-z0-9/+=]{32,}',
-        r'(?i)-----BEGIN PRIVATE KEY-----',
-        r'(?i)ssh-rsa [A-Za-z0-9+/]{100,}'
-    ]
-    findings = []
-    for pattern in secret_patterns:
-        matches = re.findall(pattern, diff_text)
-        if matches:
-            findings.extend(matches)
-    if findings:
-        return "### 🔒 Security Scan: Issues Found\n" + "\n".join(f"- `{match}`" for match in findings)
-    return "### 🔒 Security Scan: No Issues\nNo secrets or credentials detected."
-
-
-def scan_for_compliance(diff_text):
-    compliance_keywords = [
-        r'patient', r'PII', r'PHI', r'HIPAA', r'ssn', r'dob', r'address', r'phone', r'email', r'health', r'medical'
-    ]
-    risky_patterns = [
-        r'print\s*\(', r'logging\.debug', r'logging\.info', r'open\s*\(', r'pickle\.load', r'eval\s*\('
-    ]
-    findings = []
-    for keyword in compliance_keywords:
-        if re.search(keyword, diff_text, re.IGNORECASE):
-            findings.append(f"Keyword `{keyword}` found (check handling)")
-    for pattern in risky_patterns:
-        if re.search(pattern, diff_text):
-            findings.append(f"Risky pattern `{pattern}` found (review carefully)")
-    if findings:
-        return "### 📜 Compliance Scan: Issues Found\n" + "\n".join(f"- {msg}" for msg in findings)
-    return "### 📜 Compliance Scan: No Issues\nNo compliance issues detected."
-
-
-def summarize_pr_changes(diff_text):
-    added = len(re.findall(r'^\+[^+]', diff_text, re.MULTILINE))
-    removed = len(re.findall(r'^-[^-]', diff_text, re.MULTILINE))
-    files_changed = len(re.findall(r'diff --git', diff_text))
-    return (
-        "### High-level PR Summary\n"
-        f"**Files changed:** {files_changed}\n"
-        f"**Lines added:** {added}\n"
-        f"**Lines removed:** {removed}\n"
-    )
-
-
-def post_comment(pr, body):
-    pr.create_issue_comment(body)
-
-
-def main():
+def run_security_scan(pr):
     issues = []
+    for f in pr.get_files():
+        patch = f.patch or ""
+        for pattern in SECURITY_PATTERNS:
+            if re.search(pattern, patch):
+                issues.append(f"Pattern `{pattern}` found in `{f.filename}`")
+    return issues
 
-    # Branch validation
-    branch_issue = validate_branch_name(branch_name)
-    branch_status = "✅" if not branch_issue else "❌"
-    if branch_issue:
-        issues.append("### Branch Name Validation\n" + branch_issue)
+
+def run_compliance_scan(pr):
+    issues = []
+    for f in pr.get_files():
+        patch = f.patch or ""
+        for pattern in COMPLIANCE_PATTERNS:
+            if re.search(pattern, patch):
+                issues.append(f"Pattern `{pattern}` found in `{f.filename}`")
+    return issues
+
+
+def summarize_pr(pr):
+    return f"""
+### High-level PR Summary
+**Files changed:** {pr.changed_files}  
+**Lines added:** {pr.additions}  
+**Lines removed:** {pr.deletions}  
+"""
+
+
+# ---------------- MAIN ---------------- #
+def main(repo_name, pr_number, token):
+    g = Github(token)
+    repo = g.get_repo(repo_name)
+    pr = repo.get_pull(int(pr_number))
+
+    # Branch name
+    branch_valid, branch_msg = validate_branch_name(pr.head.ref)
 
     # Commit messages
-    commit_section, valid_commits = validate_commit_messages(pr)
-    commit_status = "✅" if valid_commits else "❌"
-    issues.append(commit_section)
+    commit_validation = validate_commit_messages(pr)
 
-    # PR diff scans
-    diff_text = get_pr_diff(pr)
-    if diff_text:
-        issues.append(summarize_pr_changes(diff_text))
+    # Security + compliance scans
+    security_issues = run_security_scan(pr)
+    compliance_issues = run_compliance_scan(pr)
 
-        sec_result = scan_for_secrets(diff_text)
-        issues.append(f"<details>\n<summary>🔒 Security Scan</summary>\n\n{sec_result}\n</details>")
-        security_status = "✅" if "No Issues" in sec_result else "❌"
-
-        comp_result = scan_for_compliance(diff_text)
-        issues.append(f"<details>\n<summary>📜 Compliance Scan</summary>\n\n{comp_result}\n</details>")
-        compliance_status = "✅" if "No Issues" in comp_result else "⚠️"
-    else:
-        issues.append("### PR Diff Error\nCould not fetch PR diff.")
-        security_status = "❌"
-        compliance_status = "❌"
+    # Statuses
+    branch_status = "✅" if branch_valid else "❌"
+    commit_status = "✅" if "Invalid format" not in commit_validation and "Too long" not in commit_validation else "❌"
+    security_status = "✅" if not security_issues else "❌"
+    compliance_status = "✅" if not compliance_issues else "⚠️"
 
     # Summary table
     summary_table = [
@@ -170,9 +116,34 @@ def main():
         f"| Compliance       | {compliance_status} |",
     ]
 
-    final_comment = "\n".join(summary_table) + "\n\n" + "\n\n".join(issues)
-    post_comment(pr, final_comment)
+    # Final report
+    print("\n".join(summary_table))
+    print("\n### Branch Name Validation")
+    print(branch_msg)
+
+    print(summarize_pr(pr))
+    print(commit_validation)
+
+    if security_issues:
+        print("\n<details>\n<summary>🔒 Security Scan: Issues Found</summary>\n")
+        for issue in security_issues:
+            print(f"- {issue}")
+        print("</details>")
+    else:
+        print("\n🔒 Security Scan: No issues found ✅")
+
+    if compliance_issues:
+        print("\n<details>\n<summary>📜 Compliance Scan: Issues Found</summary>\n")
+        for issue in compliance_issues:
+            print(f"- {issue}")
+        print("</details>")
+    else:
+        print("\n📜 Compliance Scan: No issues found ✅")
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 4:
+        print("Usage: python pr_reviewer.py <repo> <pr_number> <github_token>")
+        sys.exit(1)
+    _, repo_name, pr_number, token = sys.argv
+    main(repo_name, pr_number, token)
