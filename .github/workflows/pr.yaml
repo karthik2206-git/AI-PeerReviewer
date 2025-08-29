@@ -1,34 +1,46 @@
-name: AI PR Reviewer
+name: PR Review
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write   # needed to comment on PR
 
 jobs:
   pr-review:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      # Checkout the PR branch
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # needed for full history and gitleaks
 
-    - name: Install dependencies
-      run: pip install -r scripts/requirements.txt
+      # Setup Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
 
-    - name: Run PR Review Bot
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        GITHUB_REPOSITORY: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_BRANCH: ${{ github.head_ref }}
-      run: python scripts/pr_reviewer.py
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyGithub gitpython
 
+      # Install Gitleaks
+      - name: Install Gitleaks
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/zricethezav/gitleaks/main/install.sh | bash
+
+      # Run PR Reviewer Script
+      - name: Run PR Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python scripts/pr_reviewer.py
