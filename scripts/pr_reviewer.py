@@ -58,61 +58,78 @@ def validate_commit_messages(pr):
     return "\n".join(result), not invalid_found
 
 
-def summarize_pr(pr):
-    return f"""
+def summarize_pr(pr, gitleaks_issues=None, compliance_issues=None):
+    summary = f"""
 ### High-level PR Summary
 **Files changed:** {pr.changed_files}  
 **Lines added:** {pr.additions}  
 **Lines removed:** {pr.deletions}  
+**Commits:** {pr.commits}  
 """
+    risky_files = set()
+    if gitleaks_issues:
+        risky_files.update(gitleaks_issues.keys())
+    if compliance_issues:
+        risky_files.update(compliance_issues.keys())
+    if risky_files:
+        summary += "**Files triggering security/compliance issues:** " + ", ".join(risky_files) + "\n"
+    return summary
 
 
 # ---------------- GITLEAKS SCAN ---------------- #
 def run_gitleaks_scan(repo_path="."):
+    file_issues = {}
     try:
         result = subprocess.run(
             ["gitleaks", "detect", "--source", repo_path, "--report-format", "json"],
             capture_output=True, text=True, check=False
         )
-        secrets = []
         if result.stdout.strip():
             data = json.loads(result.stdout)
             for entry in data:
                 path = entry.get("file", "")
+                if "pr_reviewer.py" in path:
+                    continue  # skip script itself
                 rule = entry.get("rule", "")
-                secrets.append(f"{rule} found in `{path}`")
-        return secrets
+                file_issues.setdefault(path, []).append(rule)
+        return file_issues
     except Exception as e:
-        return [f"Gitleaks scan failed: {e}"]
+        return {"Gitleaks scan error": [str(e)]}
 
 
 # ---------------- COMPLIANCE SCAN ---------------- #
 def run_compliance_scan(repo_path="."):
-    findings = []
+    file_issues = {}
     for root, dirs, files in os.walk(repo_path):
         for file in files:
             if file.endswith(('.py', '.js', '.txt', '.yaml', '.json')):
+                if file == "pr_reviewer.py":  # skip self
+                    continue
                 path = os.path.join(root, file)
                 try:
                     with open(path, 'r', encoding='utf-8') as f:
                         content = f.read()
+                    issues = []
                     # check keywords
                     for kw in COMPLIANCE_KEYWORDS:
                         if re.search(kw, content, re.IGNORECASE):
-                            findings.append(f"Keyword `{kw}` found in `{file}`")
+                            issues.append(f"Keyword `{kw}`")
                     # check risky patterns
                     for rp in RISKY_PATTERNS:
                         if re.search(rp, content):
-                            findings.append(f"Risky pattern `{rp}` found in `{file}`")
+                            issues.append(f"Risky pattern `{rp}`")
+                    if issues:
+                        file_issues[path] = issues
                 except:
                     continue
-    return findings
+    return file_issues
 
 
 # ---------------- REPORT ---------------- #
 def generate_report(pr, branch_msg, commit_validation, gitleaks_issues,
                     compliance_issues, branch_status, commit_status,
                     security_status, compliance_status):
+
     summary_table = [
         "| Check            | Status |",
         "|------------------|--------|",
@@ -126,20 +143,24 @@ def generate_report(pr, branch_msg, commit_validation, gitleaks_issues,
         "\n".join(summary_table),
         "### Branch Name Validation",
         branch_msg,
-        summarize_pr(pr),
+        summarize_pr(pr, gitleaks_issues, compliance_issues),
         commit_validation,
     ]
 
     # Security / Gitleaks
     if gitleaks_issues:
-        sec_text = "\n".join(f"- {issue}" for issue in gitleaks_issues)
+        sec_text = "\n".join(
+            f"- `{file}`: {', '.join(issues)}" for file, issues in gitleaks_issues.items()
+        )
         report_parts.append(f"<details>\n<summary>🔒 Security Scan: Issues Found</summary>\n\n{sec_text}\n</details>")
     else:
         report_parts.append("🔒 Security Scan: No issues found ✅")
 
     # Compliance
     if compliance_issues:
-        comp_text = "\n".join(f"- {issue}" for issue in compliance_issues)
+        comp_text = "\n".join(
+            f"- `{file}`: {', '.join(issues)}" for file, issues in compliance_issues.items()
+        )
         report_parts.append(f"<details>\n<summary>⚖️ Compliance Scan: Issues Found</summary>\n\n{comp_text}\n</details>")
     else:
         report_parts.append("⚖️ Compliance Scan: No issues found ✅")
