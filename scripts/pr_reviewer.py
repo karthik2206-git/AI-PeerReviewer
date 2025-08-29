@@ -142,8 +142,18 @@ def main(repo_name, pr_number, token):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: python pr_reviewer.py <repo> <pr_number> <github_token>")
-        sys.exit(1)
-    _, repo_name, pr_number, token = sys.argv
+    import os
+
+    if len(sys.argv) == 4:
+        _, repo_name, pr_number, token = sys.argv
+    else:
+        repo_name = os.getenv("GITHUB_REPOSITORY")
+        pr_number = os.getenv("PR_NUMBER")
+        token = os.getenv("GITHUB_TOKEN")
+
+        if not (repo_name and pr_number and token):
+            print("❌ Missing arguments. Provide CLI args or set env vars: GITHUB_REPOSITORY, PR_NUMBER, GITHUB_TOKEN")
+            sys.exit(1)
+
     main(repo_name, pr_number, token)
+
