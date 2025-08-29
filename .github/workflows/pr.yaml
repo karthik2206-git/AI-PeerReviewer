@@ -21,12 +21,14 @@ jobs:
         python-version: '3.11'
 
     - name: Install dependencies
-      run: pip install -r .github/scripts/requirements.txt
+      run: pip install -r scripts/requirements.txt
 
     - name: Run PR Review Bot
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_BRANCH: ${{ github.head_ref }}
-      run: python .github/scripts/pr_reviewer.py
+      run: python scripts/pr_reviewer.py
+
